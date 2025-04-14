@@ -17,10 +17,10 @@ import time # For timing
 finetune_snn = True # Set to True to enable fine-tuning (or loading if already done)
 finetune_epochs = 1 # Number of epochs for fine-tuning
 learning_rate = 1e-5 # Learning rate for fine-tuning optimizer
-train_finetune_timesteps = 100 # Timesteps used DURING fine-tuning per batch
+train_finetune_timesteps = 25 # Timesteps used DURING fine-tuning per batch
 
 # --- Evaluation Params ---
-evaluation_timesteps = 100 # Fixed timesteps for FINAL evaluation
+evaluation_timesteps = 50 # Fixed timesteps for FINAL evaluation
 
 # --- Data/Model Params ---
 num_classes = 10
@@ -47,7 +47,7 @@ print("PyTorch Version:", torch.__version__)
 # Adjust num_workers based on the device and OS capabilities
 # On Windows, num_workers > 0 can sometimes cause issues. Start with 0 or 2.
 # On Linux with CUDA, 4 or 8 might be good starting points.
-num_workers = 16 if device.type == 'cuda' else 0
+num_workers = 8 if device.type == 'cuda' else 0
 pin_memory = False if device.type == 'cuda' else False
 print(f"Using Device: {device}, Num Workers: {num_workers}, Pin Memory: {pin_memory}")
 

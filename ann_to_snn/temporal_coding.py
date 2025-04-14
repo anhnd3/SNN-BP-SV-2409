@@ -44,7 +44,7 @@ dataset_name = "CIFAR10DVS"
 
 # --- Fine-Tuning Params ---
 finetune_snn = True # Enable fine-tuning
-finetune_epochs = 3 # Number of fine-tuning epochs (Adjust as needed)
+finetune_epochs = 1 # Number of fine-tuning epochs (Adjust as needed)
 learning_rate = 1e-4 # Learning rate (Adjust as needed)
 optimizer_choice = 'AdamW'
 
@@ -57,34 +57,47 @@ T = 32 # Total timesteps (Adjust as needed)
 num_classes = 10 # CIFAR10-DVS has 10 classes
 # Adjust batch size based on GPU memory
 batch_size = 8
-data_dir = 'ann_to_snn/data' # Root data directory to download/load datasets
+data_dir = './ann_to_snn/data' # Root data directory to download/load datasets
 ann_model_name = "vgg16"
 # << Path for the TTFS fine-tuned SNN model >>
-best_model_save_path = f'ann_to_snn/data/models/{ann_model_name}_{dataset_name}_T{T}_{coding_type}_finetuned.pth'
-os.makedirs(os.path.dirname(best_model_save_path), exist_ok=True) # Ensure directory exists
+model_save_path = f'./ann_to_snn/data/models/{ann_model_name}_{dataset_name}_T{T}_{coding_type}_finetuned.pth'
+best_model_save_path = model_save_path.replace('.pth', '_best.pth')
+os.makedirs(os.path.dirname(model_save_path), exist_ok=True) # Ensure directory exists
 
 # -------------------------------
 # Device Setup
 # -------------------------------
+
 if torch.cuda.is_available():
-    device = torch.device("cuda")
+    device = torch.device("cuda:0")
     print("Using NVIDIA CUDA device.")
 else:
     device = torch.device("cpu")
     print("Using CPU device.")
+    
+print("-" * 50)
+print("CUDA Diagnostics:")
+print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+print(f"torch.cuda.device_count(): {torch.cuda.device_count()}")
+if torch.cuda.is_available():
+    print(f"torch.cuda.current_device(): {torch.cuda.current_device()}")
+    print(f"torch.cuda.get_device_name(0): {torch.cuda.get_device_name(0)}") # Check name of device 0
+print(f"Device variable used in script: {device}")
+print("-" * 50)    
+
 print("PyTorch Version:", torch.__version__)
 # Adjust num_workers based on your system's RAM and CPU cores
-num_workers = 4 # Start moderate, set to 0 if memory/forking issues occur
-pin_memory = True if device.type == 'cuda' else False
+num_workers = 0 # Start moderate, set to 0 if memory/forking issues occur
+pin_memory = False if device.type == 'cuda' else False
 print(f"Using Device: {device}, Num Workers: {num_workers}, Pin Memory: {pin_memory}")
 
 # --- AMP (Automatic Mixed Precision) Setup ---
 use_amp = torch.cuda.is_available() # Enable AMP only if CUDA is available
 # Initialize GradScaler OUTSIDE the training function
-scaler = GradScaler(enabled=use_amp)
+scaler = torch.amp.GradScaler(device='cuda', enabled=use_amp)
 print(f"Using Automatic Mixed Precision (AMP): {use_amp}")
 
-###############################################
+###############################################_
 # Spiking Wrapper Module (from User Script)
 # Wraps a layer (usually Identity after Conv/Linear)
 # with a LIF neuron.
@@ -261,35 +274,78 @@ print(f"Using sensor size: {sensor_size} for Tonic ToFrame")
 # Using ToFrame outputs tensors (usually). torchvision Resize works on tensors [..., H, W].
 frame_transform = T_transforms.Compose([
     # T_transforms.Denoise(filter_time=10000), # Optional
-    T_transforms.ToFrame(sensor_size=sensor_size, n_time_bins=T),
-    # Apply Resize directly to the tensor output by ToFrame.
-    # ToFrame likely outputs [T, C, H, W]. Resize works on last 2 dims.
-    transforms.Resize((224, 224), antialias=True) # Use antialias for better quality
+    T_transforms.ToFrame(sensor_size=sensor_size, n_time_bins=T)
+    # REMOVED transforms.Resize from here
 ])
 
-# --- Create Tonic Datasets ---
+# --- Create Full Tonic Dataset ---
 try:
-    print(f"Loading {dataset_name} from: {data_dir}")
-    # Ensure you have the correct class name and args for Tonic's CIFAR10DVS
-    train_dataset_tonic = CIFAR10DVS(
+    print(f"Loading Full {dataset_name} from: {data_dir}")
+    full_dataset_tonic = CIFAR10DVS(
         save_to=data_dir,
-        train=True,
-        transform=frame_transform
-        # download=True attribute might not exist, Tonic often downloads automatically if save_to is provided and data isn't there. Check docs.
-    )
-    test_dataset_tonic = CIFAR10DVS(
-        save_to=data_dir,
-        train=False,
         transform=frame_transform
     )
-    print("Tonic dataset objects potentially created.")
+    print(f"Tonic full dataset object created. Total samples: {len(full_dataset_tonic)}")
+    if len(full_dataset_tonic) == 0:
+         raise ValueError("Loaded dataset is empty!")
+    # Common split: 9000 train, 1000 test (total 10000) - VERIFY THIS!
+    num_total_samples = len(full_dataset_tonic)
+    # Adjust these numbers if the total count or standard split differs
+    num_train_samples = 9000
+    num_test_samples = 1000
+
+    if num_total_samples != (num_train_samples + num_test_samples):
+         print(f"Warning: Expected total {num_train_samples + num_test_samples} samples for split, but found {num_total_samples}.")
+         # Fallback: Use a percentage split (e.g., 90/10)
+         num_train_samples = int(0.9 * num_total_samples)
+         num_test_samples = num_total_samples - num_train_samples
+         print(f"Using fallback split: Train={num_train_samples}, Test={num_test_samples}")
+
+
+    # --- Split into Train and Test using torch.utils.data.Subset ---
+    # Assumes the first num_train_samples are the training set
+    print(f"Splitting into Train: {num_train_samples}, Test: {num_test_samples} using Subset...")
+    train_indices = list(range(num_train_samples))
+    test_indices = list(range(num_train_samples, num_train_samples + num_test_samples))
+
+    train_dataset_tonic = torch.utils.data.Subset(full_dataset_tonic, train_indices)
+    test_dataset_tonic = torch.utils.data.Subset(full_dataset_tonic, test_indices)
+
+    print(f"Train subset size: {len(train_dataset_tonic)}")
+    print(f"Test subset size: {len(test_dataset_tonic)}")
+
+
+    # --- Alternative: Random Split (if order is not fixed or you want random subsets) ---
+    # generator = torch.Generator().manual_seed(42) # for reproducibility
+    # train_dataset_tonic, test_dataset_tonic = torch.utils.data.random_split(
+    #     full_dataset_tonic, [num_train_samples, num_test_samples], generator=generator
+    # )
+    # print("Split dataset using random_split.")
+
+
 except NameError:
     print(f"Error: Class 'CIFAR10DVS' not found or not imported correctly from tonic.datasets.")
     exit()
 except Exception as e:
-     print(f"Error loading {dataset_name} via Tonic: {e}")
-     print("Ensure Tonic is installed, path is correct, download works, and check Tonic docs for args.")
+     print(f"Error loading/splitting {dataset_name} via Tonic: {e}")
      exit()
+
+def worker_init_fn(worker_id):
+    # Ensure every DataLoader worker uses device cuda:0.
+    torch.cuda.set_device(0)
+
+# --- Create Standard PyTorch DataLoaders ---
+train_loader = DataLoader(
+    train_dataset_tonic, batch_size=batch_size, shuffle=True, # Shuffle training set
+    num_workers=num_workers, pin_memory=pin_memory, drop_last=True,
+    worker_init_fn=worker_init_fn
+)
+test_loader = DataLoader(
+    test_dataset_tonic, batch_size=batch_size, shuffle=False, # No shuffle for test set
+    num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+    worker_init_fn=worker_init_fn
+)
+print(f"Tonic DataLoaders ready (Batch Size: {batch_size}).")
 
 # --- Create Standard PyTorch DataLoaders ---
 # Default collate should work if dataset yields fixed-size tensors [T, C, H, W]
@@ -347,18 +403,24 @@ print(f"SNN model created using conversion method and moved to {device}.")
 
 
 ###############################################
-# TTFS Training Function (using -first_spikes + CE Loss)
+# TTFS Training Function (Resizing moved inside)
 ###############################################
-def train_ttfs(model, train_loader, test_loader, T, device, epochs, lr, model_save_path, best_model_save_path, time_dim_idx):
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss() # Uses logits = -first_spike_times
-    model.train() # Set model to training mode initially
+def train_ttfs(model, train_loader, test_loader, T, device, epochs, lr, model_save_path, best_model_save_path, time_dim_idx, loss_margin=1.0, loss_no_spike_penalty=1.0):
+    # Assuming global scaler and use_amp are defined
+    global scaler, use_amp
 
-    best_val_acc = -1.0
-    print("\nStarting TTFS SNN Fine-tuning...")
+    print("\nStarting TTFS SNN Fine-tuning (with isolated .to(device) calls)...")
     print(f" Params: Epochs={epochs}, LR={lr}, T={T}, BatchSize={train_loader.batch_size}")
 
+    # model.to(device) # Model should be moved to device BEFORE calling this function
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss() # Uses logits = -first_spike_times
+    resizer = transforms.Resize((224, 224), antialias=True) # Define resizer once
+
+    best_val_acc = -1.0
+
     for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
         model.train() # Ensure model is in train mode at start of epoch
         running_loss = 0.0
         correct_train = 0
@@ -367,49 +429,109 @@ def train_ttfs(model, train_loader, test_loader, T, device, epochs, lr, model_sa
 
         pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1} Training")
         for i, batch_data in pbar:
+            # --- Data Loading and Initial Prep ---
             if isinstance(batch_data, (list, tuple)):
-                inputs, labels = batch_data[0], batch_data[1]
-            else: continue
+                inputs_cpu, labels_cpu = batch_data[0], batch_data[1] # Keep on CPU first
+            else:
+                print(f"Warning: Unexpected batch data format (type: {type(batch_data)}). Skipping batch {i}.")
+                continue
 
-            inputs, labels = inputs.to(device, non_blocking=pin_memory), labels.to(device)
-            B = inputs.size(0)
+            B = labels_cpu.size(0) if isinstance(labels_cpu, torch.Tensor) else 0
             if B == 0: continue
+            total_train += B # Increment total samples count early
 
-            # --- Input Shape Handling ---
-            # Ensure input is [T, B, C, H, W] for explicit time stepping model input
+            # Convert if NumPy (should happen before moving)
+            if not isinstance(inputs_cpu, torch.Tensor):
+                 if isinstance(inputs_cpu, np.ndarray):
+                     inputs_cpu = torch.from_numpy(inputs_cpu)
+                 else:
+                     print(f"Warning: Input batch type {type(inputs_cpu)} not tensor or numpy. Skipping batch {i}.")
+                     total_train -= B; continue # Adjust count
+            if not isinstance(labels_cpu, torch.Tensor):
+                 if isinstance(labels_cpu, np.ndarray):
+                     labels_cpu = torch.from_numpy(labels_cpu)
+                 else:
+                     print(f"Warning: Label batch type {type(labels_cpu)} not tensor or numpy. Skipping batch {i}.")
+                     total_train -= B; continue # Adjust count
+
+            # --- *** ISOLATED .to(device) CALLS *** ---
+            try:
+                # Step 1: Move labels
+                labels = labels_cpu.to(device, non_blocking=pin_memory)
+
+                # Step 2: Move inputs
+                inputs = inputs_cpu.to(device, non_blocking=pin_memory)
+
+            except RuntimeError as e_move:
+                print(f"\n!!! RUNTIME ERROR during .to(device) in Batch {i}: {e_move}")
+                print(f"    Occurred trying to move tensor after loading batch.")
+                print(f"    Inputs CPU shape: {inputs_cpu.shape}, dtype: {inputs_cpu.dtype}")
+                print(f"    Labels CPU shape: {labels_cpu.shape}, dtype: {labels_cpu.dtype}")
+                print(f"    torch.cuda.is_available(): {torch.cuda.is_available()}")
+                print(f"    torch.cuda.current_device(): {torch.cuda.current_device()}")
+                raise e_move
+            except Exception as e_other:
+                 print(f"\n!!! UNEXPECTED ERROR during .to(device) in Batch {i}: {e_other}")
+                 raise e_other
+            # --- *** END ISOLATED .to(device) CALLS *** ---
+
+            # --- Input Shape Handling (operate on GPU tensors now) ---
+            if inputs.dim() < 4: # Need at least B, T, C, H or B, T, ...
+                 print(f"\nError: Train incorrect input dims: {inputs.dim()}. Expected >= 4. Skipping batch {i}.")
+                 total_train -= B; continue
+
             if time_dim_idx == 1: # Input is [B, T, ...]
-                inputs = inputs.permute(1, 0, *inputs.shape[2:]).contiguous() # Use contiguous after permute
+                inputs = inputs.permute(1, 0, *inputs.shape[2:]).contiguous()
             elif time_dim_idx != 0: # Input is not [T, B, ...] or [B, T, ...] or unknown
-                 print(f"\nError: Unexpected time dimension index: {time_dim_idx}. Skipping batch.")
-                 continue
+                 print(f"\nError: Train Unexpected time_dim_idx: {time_dim_idx}. Skipping batch {i}.")
+                 total_train -= B; continue
 
-            # Check final shape
-            if inputs.shape[0] != T or inputs.dim() < 5:
-                 print(f"\nError: Incorrect input shape after processing: {inputs.shape}. Expected [T, B, C, H, W]. Skipping batch.")
+            if inputs.dim() != 5 or inputs.shape[0] != T:
+                 print(f"\nError: Incorrect input shape before resize: {inputs.shape}. Expected [T={T}, B, C, H, W]. Skipping batch {i}.")
+                 total_train -= B; continue
+
+            # --- Apply Resizing Step (on GPU tensors) ---
+            try:
+                t_dim, b_dim, c_dim, h_dim, w_dim = inputs.shape
+                # Ensure input is float before resize if needed (Resize usually handles it)
+                # inputs = inputs.float()
+                inputs_reshaped = inputs.view(t_dim * b_dim, c_dim, h_dim, w_dim)
+                inputs_resized = resizer(inputs_reshaped) # Apply to Tensor B*T, C, H, W
+                inputs = inputs_resized.view(t_dim, b_dim, c_dim, 224, 224) # Reshape back
+            except Exception as e_resize:
+                 print(f"\nError during resize in train loop: {e_resize}. Input dtype: {inputs.dtype}, shape: {inputs.shape}. Skipping batch {i}.")
+                 total_train -= B # Adjust count as this batch won't proceed
                  continue
+            # --- End Resizing Step ---
 
             # --- Training Step ---
             functional.reset_net(model)
             optimizer.zero_grad(set_to_none=True)
 
-            # Simulate SNN over T timesteps explicitly
             batch_out_seq = []
+            # Apply AMP context to the forward pass simulation
             with autocast(enabled=use_amp):
                 for t in range(T):
-                    input_t = inputs[t] # Get input for timestep t [B, C, H, W]
-                    out = model(input_t)
+                    input_t = inputs[t] # Get input for timestep t [B, C, 224, 224]
+                    # Ensure input_t is float for model if necessary
+                    # input_t = input_t.float()
+                    out = model(input_t) # Model expects [B, C, H, W]
                     batch_out_seq.append(out)
+
+            if not batch_out_seq: continue # Should not happen if input checks pass
             out_seq = torch.stack(batch_out_seq, dim=0) # [T, B, N]
 
-            # Calculate Loss using TTFS Logits
+            # Calculate Loss using TTFS Logits (still within AMP context)
             with autocast(enabled=use_amp):
                 first_spikes = get_first_spike_times(out_seq, T)
-                if first_spikes is None: continue # Skip if error in helper
+                if first_spikes is None:
+                    print(f"Warning: get_first_spike_times returned None for batch {i}. Skipping loss calculation.")
+                    continue # Skip batch if spike times invalid
 
                 logits = -first_spikes.float() # Ensure float
-                loss = criterion(logits, labels)
+                loss = criterion(logits, labels) # labels are already on device
 
-            # Backward Pass & Optimizer Step
+            # Backward Pass & Optimizer Step (using AMP scaler)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -419,21 +541,22 @@ def train_ttfs(model, train_loader, test_loader, T, device, epochs, lr, model_sa
             with torch.no_grad():
                 preds = logits.argmax(dim=1)
                 correct_train += (preds == labels).sum().item()
-                total_train += B
 
+            # Update progress bar
             pbar.set_postfix({
                 'Loss': f"{loss.item():.4f}",
                 'Train Acc': f"{100.0*correct_train/total_train:.2f}%" if total_train > 0 else "0.00%"
              })
             # --- End Batch Loop ---
 
+        # --- End of Epoch ---
         end_epoch_time = time.time()
         epoch_loss = running_loss / len(train_loader) if len(train_loader) > 0 else 0
         epoch_acc = 100.0 * correct_train / total_train if total_train > 0 else 0
         print(f"Epoch {epoch+1} Summary | Time: {end_epoch_time - start_epoch_time:.2f}s | Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc:.2f}%")
 
         # --- Validation Step ---
-        val_accuracy, avg_val_spikes = evaluate_ttfs(model, test_loader, T, device, time_dim_idx, plot_first_batch=(epoch == epochs-1)) # Plot only on last epoch
+        val_accuracy, avg_val_spikes = evaluate_ttfs(model, test_loader, T, device, time_dim_idx, plot_first_batch=(epoch == epochs-1))
         if val_accuracy >= 0: # Check if accuracy was calculated
              print(f"Epoch {epoch+1} Validation Accuracy: {val_accuracy:.2f}% | Avg Spikes: {avg_val_spikes:.4f}")
              # Save Best Model
@@ -456,109 +579,162 @@ def train_ttfs(model, train_loader, test_loader, T, device, epochs, lr, model_sa
 
 
 ###############################################
-# Evaluation Function (Updated for Merged Script)
+# Evaluation Function (Updated with Resizing and Isolated .to(device))
 ###############################################
 def evaluate_ttfs(model, test_loader, T, device, time_dim_idx, plot_first_batch=True):
     model.eval()
     correct = 0
     total = 0
     spike_sum_total = 0.0
-    # Calculate neuron count based on a sample output - assumes fixed output size
-    output_dim = model.classifier[-1].out_features if isinstance(model.classifier[-1], nn.Linear) else num_classes
+    # Calculate neuron count based on final layer output size
+    try:
+        # Assumes the model passed in has the classifier attribute correctly defined
+        output_dim = model.classifier[-1].out_features if isinstance(model.classifier[-1], nn.Linear) else num_classes
+    except AttributeError:
+         print("Warning: Could not infer output_dim from model.classifier. Using num_classes config.")
+         output_dim = num_classes # num_classes needs to be accessible (e.g., global or passed)
+    except Exception as e:
+        print(f"Warning: Error inferring output_dim ({e}). Using num_classes config.")
+        output_dim = num_classes
+
     neuron_count_total = 0
-    first_batch_out_seq = None
+    first_batch_out_seq_spikes = None
     first_batch_labels = None
     first_batch_preds = None
+    resizer = transforms.Resize((224, 224), antialias=True) # Define resizer once
 
     start_eval_time = time.time()
     print(f"\nStarting TTFS Evaluation (T={T})...")
 
     with torch.no_grad():
         for i, batch_data in enumerate(tqdm(test_loader, desc="Evaluating SNN TTFS")):
+            # --- Data Loading and Prep ---
             if isinstance(batch_data, (list, tuple)):
-                inputs, labels = batch_data[0], batch_data[1]
+                inputs_cpu, labels_cpu = batch_data[0], batch_data[1]
             else: continue
 
-            inputs, labels = inputs.to(device), labels.to(device)
-            B = inputs.size(0)
+            B = labels_cpu.size(0) if isinstance(labels_cpu, torch.Tensor) else 0
             if B == 0: continue
             total += B
 
-            # Handle input shape permutation
+            if not isinstance(inputs_cpu, torch.Tensor):
+                 if isinstance(inputs_cpu, np.ndarray): inputs_cpu = torch.from_numpy(inputs_cpu)
+                 else: total -= B; continue # Skip if not tensor/numpy
+            if not isinstance(labels_cpu, torch.Tensor):
+                 if isinstance(labels_cpu, np.ndarray): labels_cpu = torch.from_numpy(labels_cpu)
+                 else: total -= B; continue # Skip if not tensor/numpy
+
+
+            # --- *** ISOLATED .to(device) CALLS *** ---
+            try:
+                labels = labels_cpu.to(device, non_blocking=pin_memory)
+                inputs = inputs_cpu.to(device, non_blocking=pin_memory)
+            except RuntimeError as e_move:
+                print(f"\n!!! RUNTIME ERROR during .to(device) in Eval Batch {i}: {e_move}")
+                print(f"    Inputs CPU shape: {inputs_cpu.shape}, dtype: {inputs_cpu.dtype}")
+                print(f"    Labels CPU shape: {labels_cpu.shape}, dtype: {labels_cpu.dtype}")
+                # Skip rest of eval? Or just this batch? Let's skip batch.
+                total -= B; continue
+            except Exception as e_other:
+                 print(f"\n!!! UNEXPECTED ERROR during .to(device) in Eval Batch {i}: {e_other}")
+                 total -= B; continue
+            # --- *** END ISOLATED .to(device) CALLS *** ---
+
+            # --- Input Shape Handling ---
+            if inputs.dim() < 4:
+                 print(f"\nError: Eval incorrect input dims: {inputs.dim()}. Expected >= 4. Skipping batch {i}.")
+                 total -= B; continue
             if time_dim_idx == 1: # Input is [B, T, ...]
                 inputs = inputs.permute(1, 0, *inputs.shape[2:]).contiguous()
             elif time_dim_idx != 0:
-                 print(f"\nError: Eval unexpected time_dim_idx: {time_dim_idx}. Skipping batch.")
-                 total -= B
-                 continue
+                 print(f"\nError: Eval Unexpected time_dim_idx: {time_dim_idx}. Skipping batch {i}.")
+                 total -= B; continue
 
-            if inputs.shape[0] != T or inputs.dim() < 5:
-                 print(f"\nError: Eval incorrect input shape: {inputs.shape}. Expected [T, B, C, H, W]. Skipping batch.")
-                 total -= B
-                 continue
+            if inputs.dim() != 5 or inputs.shape[0] != T:
+                 print(f"\nError: Eval incorrect input shape before resize: {inputs.shape}. Expected [T={T}, B, C, H, W]. Skipping batch {i}.")
+                 total -= B; continue
 
+            # --- Apply Resizing Step ---
+            try:
+                t_dim, b_dim, c_dim, h_dim, w_dim = inputs.shape
+                # inputs = inputs.float() # Ensure float for resize if needed
+                inputs_reshaped = inputs.view(t_dim * b_dim, c_dim, h_dim, w_dim)
+                inputs_resized = resizer(inputs_reshaped)
+                inputs = inputs_resized.view(t_dim, b_dim, c_dim, 224, 224)
+            except Exception as e_resize:
+                 print(f"\nError during resize in eval loop: {e_resize}. Input dtype: {inputs.dtype}, shape: {inputs.shape}. Skipping batch {i}.")
+                 total -= B; continue
+            # --- End Resizing Step ---
+
+            # --- Evaluation Step ---
             functional.reset_net(model)
             batch_out_seq = []
-            # Simulate step-by-step
+            # No need for autocast during eval unless specific layers require it
             for t in range(T):
-                input_t = inputs[t] # [B, C, H, W]
+                input_t = inputs[t] # [B, C, 224, 224]
+                # input_t = input_t.float() # Ensure float if model expects it
                 out = model(input_t)
                 batch_out_seq.append(out)
 
             if not batch_out_seq: continue
-
             batch_out_seq = torch.stack(batch_out_seq, dim=0) # [T, B, N]
 
             # Calculate TTFS prediction
             first_spikes = get_first_spike_times(batch_out_seq, T)
-            if first_spikes is None: continue # Skip if error
+            if first_spikes is None: continue
 
             logits = -first_spikes.float()
             preds = logits.argmax(dim=1)
             correct += (preds == labels).sum().item()
 
             # Collect stats
-            spike_sum_total += (batch_out_seq > 0).float().sum().item() # Count actual spikes
-            neuron_count_total += B * output_dim # Total output neurons processed in batch
+            batch_spikes = (batch_out_seq > 0).float()
+            spike_sum_total += batch_spikes.sum().item()
+            neuron_count_total += B * output_dim
 
             # Store data for visualization (only first batch)
             if i == 0:
-                first_batch_out_seq = (batch_out_seq > 0).float() # Store spikes (0/1) for raster
+                first_batch_out_seq_spikes = batch_spikes.cpu()
                 first_batch_labels = labels.cpu()
                 first_batch_preds = preds.cpu()
+            # --- End Batch Loop ---
 
+    # --- Final Metrics Calculation & Visualization ---
     end_eval_time = time.time()
     acc = 100.0 * correct / total if total > 0 else 0.0
-    # Avg spikes per output neuron per sample per timestep
     avg_spikes_per_step = spike_sum_total / (neuron_count_total * T) if neuron_count_total > 0 and T > 0 else 0.0
 
     print(f"\nEvaluation finished in {end_eval_time - start_eval_time:.2f} seconds.")
-    print(f"Test Accuracy: {acc:.2f}% ({correct}/{total})")
-    print(f"Avg. Spikes per Output Neuron per Timestep: {avg_spikes_per_step:.4f}")
+    if total > 0:
+        print(f"Test Accuracy: {acc:.2f}% ({correct}/{total})")
+        print(f"Avg. Spikes per Output Neuron per Timestep: {avg_spikes_per_step:.4f}")
+    else:
+        print("Test Accuracy: N/A (No samples processed successfully)")
+        print(f"Avg. Spikes per Output Neuron per Timestep: N/A")
+
 
     # Visualization on the first batch:
-    if plot_first_batch and first_batch_out_seq is not None:
+    if plot_first_batch and first_batch_out_seq_spikes is not None:
         print("Generating visualizations for the first batch...")
-        num_samples_to_plot = min(4, first_batch_out_seq.shape[1])
+        num_samples_to_plot = min(4, first_batch_out_seq_spikes.shape[1])
         for sample_idx in range(num_samples_to_plot):
              if sample_idx < len(first_batch_labels) and sample_idx < len(first_batch_preds):
-                 plot_spike_raster(first_batch_out_seq, # Pass actual spikes
+                 plot_spike_raster(first_batch_out_seq_spikes,
                                    gt_label=first_batch_labels[sample_idx].item(),
                                    pred_label=first_batch_preds[sample_idx].item(),
                                    sample_idx=sample_idx,
                                    title_prefix=f"Eval_")
-
-                 # Spike counts for sample `sample_idx` across T steps
-                 spike_counts_sample = first_batch_out_seq[:, sample_idx].sum(dim=0).numpy() # Sum over T
+                 spike_counts_sample = first_batch_out_seq_spikes[:, sample_idx].sum(dim=0).numpy()
                  plot_spike_count_hist(spike_counts_sample,
-                                       title=f"Eval Spike Count Histogram (Sample {sample_idx}, GT={first_batch_labels[sample_idx].item()})")
+                                       title=f"Eval Spike Count Hist (Sample {sample_idx}, GT={first_batch_labels[sample_idx].item()})")
              else:
                   print(f"Skipping plot for sample {sample_idx}, index out of bounds.")
-
     elif plot_first_batch:
-         print("Could not generate visualizations: No evaluation data recorded.")
+         print("Could not generate visualizations: No evaluation data recorded for first batch.")
 
     return acc, avg_spikes_per_step
+
+
 
 
 ###############################################
@@ -584,10 +760,50 @@ if __name__ == '__main__':
 
     # --- Run Training or Evaluation ---
     do_training = True # Set to False to only evaluate a loaded model
+    
+    # --- Manual Batch Load Test ---
+    print("\n--- Attempting Manual Batch Load and Move Test ---")
+    try:
+        manual_iter = iter(train_loader)
+        m_inputs, m_labels = next(manual_iter)
+        print(f"Manual batch loaded.")
+        print(f"  Inputs type: {type(m_inputs)}, Labels type: {type(m_labels)}")
+
+        # Convert if NumPy (shouldn't be needed if Tonic yields tensors, but check)
+        if not isinstance(m_inputs, torch.Tensor):
+            print("  Converting manual inputs from numpy...")
+            m_inputs = torch.from_numpy(m_inputs)
+        if not isinstance(m_labels, torch.Tensor):
+            print("  Converting manual labels from numpy...")
+            m_labels = torch.from_numpy(m_labels)
+
+        print(f"  Inputs shape: {m_inputs.shape}, dtype: {m_inputs.dtype}")
+        print(f"  Labels shape: {m_labels.shape}, dtype: {m_labels.dtype}")
+
+        print(f"  Moving manual labels to {device}...")
+        m_labels_gpu = m_labels.to(device)
+        print(f"  Manual labels moved. Device: {m_labels_gpu.device}")
+
+        print(f"  Moving manual inputs to {device}...")
+        m_inputs_gpu = m_inputs.to(device)
+        print(f"  Manual inputs moved. Device: {m_inputs_gpu.device}")
+
+        print("--- Manual batch move test SUCCEEDED. ---")
+        del manual_iter, m_inputs, m_labels, m_inputs_gpu, m_labels_gpu # Clean up
+        torch.cuda.empty_cache() # Clear any memory used
+
+    except StopIteration:
+        print("--- Manual batch move test FAILED: DataLoader yielded no data. ---")
+    except Exception as e_manual:
+        print(f"--- Manual batch move test FAILED: {e_manual} ---")
+        import traceback
+        traceback.print_exc()
+        print("--- Exiting due to failure in manual test ---")
+        exit() # Stop if the basic loading/moving fails here
 
     if do_training:
         print("\nStarting TTFS Fine-Tuning on N-CIFAR10...")
-        train_ttfs(snn_model, train_loader, test_loader, device, T, finetune_epochs, learning_rate, model_save_path, best_model_save_path, time_dim_idx)
+        train_ttfs(snn_model, train_loader, test_loader, device, T, finetune_epochs, learning_rate, model_save_path, best_model_save_path, time_dim_index)
         # After training, load the best model saved during training for final evaluation
         if os.path.exists(best_model_save_path):
             print("\nLoading BEST model saved during training for final evaluation...")
@@ -616,6 +832,7 @@ if __name__ == '__main__':
 
     # --- Final Evaluation ---
     print("\n--- Final Evaluation ---")
-    evaluate_ttfs(snn_model, test_loader, T, device, time_dim_idx, plot_first_batch=True)
+    evaluate_ttfs(snn_model, test_loader, T, device, time_dim_index, plot_first_batch=True)
 
     print("\nScript finished.")
+    
