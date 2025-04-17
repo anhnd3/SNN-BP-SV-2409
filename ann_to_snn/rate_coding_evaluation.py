@@ -32,7 +32,7 @@ model_path_T20 = os.path.join(model_base_dir, 'finetuned_vgg16_snn_cifar10_e1_t2
 model_path_T25 = os.path.join(model_base_dir, 'finetuned_vgg16_snn_cifar10_e1_t25.pth') # Verify filename if needed
 
 results_dir = './ann_to_snn/data/results'
-results_img_path = os.path.join(results_dir, "evaluation_ann2snn_rate_coding_charts.png")
+results_img_path = os.path.join(results_dir, "./ann_to_snn/evaluation_ann2snn_rate_coding_charts.png")
 os.makedirs(results_dir, exist_ok=True) # Ensure results directory exists
 
 # Evaluation Hyperparameters
@@ -195,7 +195,7 @@ if __name__ == '__main__': # Protect execution
 
     # Dictionary mapping model labels to their saved state_dict paths
     models_to_evaluate = {
-        # "T_train=20": model_path_T20,
+        "T_train=20": model_path_T20,
         "T_train=25": model_path_T25
     }
 
