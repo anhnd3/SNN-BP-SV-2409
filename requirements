@@ -42,6 +42,7 @@ nvidia-nccl-cu12==2.26.2
 nvidia-nvjitlink-cu12==12.8.61
 nvidia-nvtx-cu12==12.8.55
 packaging==24.2
+pandas==2.2.3
 pbr==6.1.1
 pillow==11.0.0
 platformdirs==4.3.7
@@ -50,9 +51,11 @@ pycparser==2.22
 pyparsing==3.2.3
 python-dateutil==2.9.0.post0
 pytorch-triton==3.3.0+git96316ce5
+pytz==2025.2
 requests==2.32.3
 scikit-learn==1.6.1
 scipy==1.15.2
+seaborn==0.13.2
 setuptools==70.2.0
 six==1.17.0
 soundfile==0.13.1
@@ -69,4 +72,5 @@ torchaudio==2.6.0.dev20250412+cu128
 torchvision==0.22.0.dev20250412+cu128
 tqdm==4.67.1
 typing_extensions==4.12.2
+tzdata==2025.2
 urllib3==2.4.0
