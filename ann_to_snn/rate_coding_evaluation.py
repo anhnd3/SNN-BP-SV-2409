@@ -31,8 +31,8 @@ model_base_dir = './ann_to_snn/data/models'
 model_path_T20 = os.path.join(model_base_dir, 'finetuned_vgg16_snn_cifar10_e1_t20.pth') # Verify filename if needed
 model_path_T25 = os.path.join(model_base_dir, 'finetuned_vgg16_snn_cifar10_e1_t25.pth') # Verify filename if needed
 
-results_dir = './ann_to_snn/data/results'
-results_img_path = os.path.join(results_dir, "./ann_to_snn/evaluation_ann2snn_rate_coding_charts.png")
+results_dir = './ann_to_snn/results'
+results_img_path = os.path.join(results_dir, "./evaluation_ann2snn_rate_coding_charts.png")
 os.makedirs(results_dir, exist_ok=True) # Ensure results directory exists
 
 # Evaluation Hyperparameters
